@@ -2,7 +2,7 @@
 
 Este projeto é uma solução robusta para gerenciamento de reservas de restaurantes, focada em alta performance, escalabilidade e manutenibilidade.
 
-🎥 **ASSISTA AQUI O VÍDEO DE APRESENTAÇÃO TÉCNICA:**
+🎥 **[ASSISTA AQUI O VÍDEO DE APRESENTAÇÃO TÉCNICA](https://youtu.be/BSnxxpPxKlU)**
 
 ## 🛠️ Tecnologias Utilizadas
 
