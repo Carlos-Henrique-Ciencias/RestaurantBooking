@@ -1,5 +1,6 @@
 version: '3.8'
 services:
+  # --- BANCO DE DADOS ---
   postgres:
     image: postgres:16
     environment:
@@ -8,10 +9,16 @@ services:
       POSTGRES_DB: restaurant_booking
     ports:
       - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # --- CACHE ---
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+
+  # --- MENSAGERIA ---
   rabbitmq:
     image: rabbitmq:3-management-alpine
     environment:
@@ -20,9 +27,49 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
-  seq:
-    image: datalust/seq:latest
-    environment:
-      ACCEPT_EULA: Y
+
+  # --- BACKEND (API .NET) ---
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
-      - "5341:80"
+      - "5130:8080"
+    environment:
+      - ConnectionStrings__DefaultConnection=Host=postgres;Port=5432;Database=restaurant_booking;Username=booking;Password=booking123
+      - ConnectionStrings__Redis=redis:6379
+      - ConnectionStrings__RabbitMQ=amqp://booking:booking123@rabbitmq:5672
+      - ASPNETCORE_ENVIRONMENT=Development
+    depends_on:
+      - postgres
+      - rabbitmq
+      - redis
+
+  # --- FRONTEND (REACT) ---
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend/src:/app/src
+    depends_on:
+      - api
+
+  # --- TUNEL 1: FRONTEND ---
+  tunnel-front:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --url http://frontend:5173
+    depends_on:
+      - frontend
+
+  # --- TUNEL 2: API (SWAGGER) ---
+  tunnel-api:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --url http://api:8080
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

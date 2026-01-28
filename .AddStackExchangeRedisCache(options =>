@@ -1,0 +1,317 @@
+[1mdiff --git a/docker-compose.yml b/docker-compose.yml[m
+[1mindex 9d8d934..352a579 100644[m
+[1m--- a/docker-compose.yml[m
+[1m+++ b/docker-compose.yml[m
+[36m@@ -1,5 +1,6 @@[m
+ version: '3.8'[m
+ services:[m
+[32m+[m[32m  # --- BANCO DE DADOS ---[m
+   postgres:[m
+     image: postgres:16[m
+     environment:[m
+[36m@@ -8,10 +9,16 @@[m [mservices:[m
+       POSTGRES_DB: restaurant_booking[m
+     ports:[m
+       - "5432:5432"[m
+[32m+[m[32m    volumes:[m
+[32m+[m[32m      - pgdata:/var/lib/postgresql/data[m
+[32m+[m
+[32m+[m[32m  # --- CACHE ---[m
+   redis:[m
+     image: redis:7-alpine[m
+     ports:[m
+       - "6379:6379"[m
+[32m+[m
+[32m+[m[32m  # --- MENSAGERIA ---[m
+   rabbitmq:[m
+     image: rabbitmq:3-management-alpine[m
+     environment:[m
+[36m@@ -20,9 +27,49 @@[m [mservices:[m
+     ports:[m
+       - "5672:5672"[m
+       - "15672:15672"[m
+[31m-  seq:[m
+[31m-    image: datalust/seq:latest[m
+[32m+[m
+[32m+[m[32m  # --- BACKEND (API .NET) ---[m
+[32m+[m[32m  api:[m
+[32m+[m[32m    build:[m
+[32m+[m[32m      context: .[m
+[32m+[m[32m      dockerfile: Dockerfile[m
+[32m+[m[32m    ports:[m
+[32m+[m[32m      - "5130:8080"[m
+     environment:[m
+[31m-      ACCEPT_EULA: Y[m
+[32m+[m[32m      - ConnectionStrings__DefaultConnection=Host=postgres;Port=5432;Database=restaurant_booking;Username=booking;Password=booking123[m
+[32m+[m[32m      - ConnectionStrings__Redis=redis:6379[m
+[32m+[m[32m      - ConnectionStrings__RabbitMQ=amqp://booking:booking123@rabbitmq:5672[m
+[32m+[m[32m      - ASPNETCORE_ENVIRONMENT=Development[m
+[32m+[m[32m    depends_on:[m
+[32m+[m[32m      - postgres[m
+[32m+[m[32m      - rabbitmq[m
+[32m+[m[32m      - redis[m
+[32m+[m
+[32m+[m[32m  # --- FRONTEND (REACT) ---[m
+[32m+[m[32m  frontend:[m
+[32m+[m[32m    build:[m
+[32m+[m[32m      context: ./frontend[m
+[32m+[m[32m      dockerfile: Dockerfile[m
+     ports:[m
+[31m-      - "5341:80"[m
+[32m+[m[32m      - "5173:5173"[m
+[32m+[m[32m    volumes:[m
+[32m+[m[32m      - ./frontend/src:/app/src[m
+[32m+[m[32m    depends_on:[m
+[32m+[m[32m      - api[m
+[32m+[m
+[32m+[m[32m  # --- TUNEL 1: FRONTEND ---[m
+[32m+[m[32m  tunnel-front:[m
+[32m+[m[32m    image: cloudflare/cloudflared:latest[m
+[32m+[m[32m    command: tunnel --url http://frontend:5173[m
+[32m+[m[32m    depends_on:[m
+[32m+[m[32m      - frontend[m
+[32m+[m
+[32m+[m[32m  # --- TUNEL 2: API (SWAGGER) ---[m
+[32m+[m[32m  tunnel-api:[m
+[32m+[m[32m    image: cloudflare/cloudflared:latest[m
+[32m+[m[32m    command: tunnel --url http://api:8080[m
+[32m+[m[32m    depends_on:[m
+[32m+[m[32m      - api[m
+[32m+[m
+[32m+[m[32mvolumes:[m
+[32m+[m[32m  pgdata:[m
+[1mdiff --git a/src/RestaurantBooking.Api/Program.cs b/src/RestaurantBooking.Api/Program.cs[m
+[1mindex a427846..f02d05b 100644[m
+[1m--- a/src/RestaurantBooking.Api/Program.cs[m
+[1m+++ b/src/RestaurantBooking.Api/Program.cs[m
+[36m@@ -1,9 +1,11 @@[m
+ using Hangfire;[m
+ using Hangfire.PostgreSql;[m
+[32m+[m[32musing Microsoft.EntityFrameworkCore; // Necessário para Migrate()[m
+ using RestaurantBooking.Application.Commands;[m
+ using RestaurantBooking.Application.Queries;[m
+ using RestaurantBooking.Application.Interfaces;[m
+ using RestaurantBooking.Infrastructure;[m
+[32m+[m[32musing RestaurantBooking.Infrastructure.Persistence; // Necessário para acessar o DbContext[m
+ using RestaurantBooking.Infrastructure.Services;[m
+ using RestaurantBooking.Infrastructure.Jobs;[m
+ [m
+[36m@@ -11,6 +13,16 @@[m [mvar builder = WebApplication.CreateBuilder(args);[m
+ [m
+ builder.Services.AddInfrastructure(builder.Configuration);[m
+ [m
+[32m+[m[32m// --- CONFIGURAÇÃO DO CORS ---[m
+[32m+[m[32mbuilder.Services.AddCors(options =>[m
+[32m+[m[32m{[m
+[32m+[m[32m    options.AddPolicy("AllowAll",[m
+[32m+[m[32m        policy => policy[m
+[32m+[m[32m            .AllowAnyOrigin()[m
+[32m+[m[32m            .AllowAnyMethod()[m
+[32m+[m[32m            .AllowAnyHeader());[m
+[32m+[m[32m});[m
+[32m+[m
+ // --- CACHE (Redis) ---[m
+ builder.Services.AddStackExchangeRedisCache(options =>[m
+ {[m
+[36m@@ -22,13 +34,12 @@[m [mbuilder.Services.AddMemoryCache();[m
+ // --- RABBITMQ ---[m
+ builder.Services.AddScoped<IRabbitMQService, RabbitMQService>();[m
+ [m
+[31m-// --- HANGFIRE (Banco Postgres) ---[m
+[32m+[m[32m// --- HANGFIRE ---[m
+ builder.Services.AddHangfire(config => config[m
+     .UseSimpleAssemblyNameTypeSerializer()[m
+     .UseRecommendedSerializerSettings()[m
+     .UsePostgreSqlStorage(c => c.UseNpgsqlConnection(builder.Configuration.GetConnectionString("DefaultConnection"))));[m
+[31m-[m
+[31m-builder.Services.AddHangfireServer(); // O Servidor que roda os jobs[m
+[32m+[m[32mbuilder.Services.AddHangfireServer();[m
+ [m
+ // --- HANDLERS ---[m
+ builder.Services.AddScoped<CreateReservationHandler>();[m
+[36m@@ -43,27 +54,35 @@[m [mbuilder.Services.AddSwaggerGen();[m
+ [m
+ var app = builder.Build();[m
+ [m
+[31m-// --- CONFIGURAÇÃO DO PIPELINE ---[m
+[31m-if (app.Environment.IsDevelopment())[m
+[32m+[m[32m// --- APLICAÇÃO AUTOMÁTICA DAS TABELAS (MIGRATION) ---[m
+[32m+[m[32m// Isso aqui resolve o erro "relation does not exist"[m
+[32m+[m[32musing (var scope = app.Services.CreateScope())[m
+ {[m
+[31m-    app.UseSwagger();[m
+[31m-    app.UseSwaggerUI();[m
+[32m+[m[32m    var services = scope.ServiceProvider;[m
+[32m+[m[32m    try[m[41m [m
+[32m+[m[32m    {[m
+[32m+[m[32m        var context = services.GetRequiredService<RestaurantBookingDbContext>();[m
+[32m+[m[32m        // Se o banco não existir, cria. Se existir, atualiza as tabelas.[m
+[32m+[m[32m        context.Database.Migrate();[m
+[32m+[m[32m        Console.WriteLine("✅ Banco de dados migrado com sucesso!");[m
+[32m+[m[32m    }[m
+[32m+[m[32m    catch (Exception ex)[m
+[32m+[m[32m    {[m
+[32m+[m[32m        Console.WriteLine($"❌ Erro ao migrar banco: {ex.Message}");[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m[32m    // Configura o Job do Hangfire[m
+[32m+[m[32m    var recurringJobManager = services.GetRequiredService<IRecurringJobManager>();[m
+[32m+[m[32m    recurringJobManager.AddOrUpdate<NoShowJob>("process-no-shows", job => job.ProcessNoShows(), Cron.Hourly);[m
+ }[m
+ [m
+[32m+[m[32m// --- PIPELINE ---[m
+[32m+[m[32mapp.UseSwagger();[m
+[32m+[m[32mapp.UseSwaggerUI();[m
+ app.UseHttpsRedirection();[m
+[32m+[m[32mapp.UseCors("AllowAll");[m
+ app.UseAuthorization();[m
+[31m-[m
+[31m-// Painel do Hangfire (Dashboard visual)[m
+ app.UseHangfireDashboard();[m
+ [m
+[31m-// Agendamento do Job Recorrente (Roda a cada hora)[m
+[31m-using (var scope = app.Services.CreateScope())[m
+[31m-{[m
+[31m-    var recurringJobManager = scope.ServiceProvider.GetRequiredService<IRecurringJobManager>();[m
+[31m-    // Expressão Cron.Hourly roda de hora em hora. Para teste, pode mudar.[m
+[31m-    recurringJobManager.AddOrUpdate<NoShowJob>("process-no-shows", job => job.ProcessNoShows(), Cron.Hourly);[m
+[31m-}[m
+[31m-[m
+ app.MapControllers();[m
+[31m-[m
+ app.Run();[m
+[1mdiff --git a/src/RestaurantBooking.Api/RestaurantBooking.Api.csproj b/src/RestaurantBooking.Api/RestaurantBooking.Api.csproj[m
+[1mindex e3fa64d..6f27fab 100644[m
+[1m--- a/src/RestaurantBooking.Api/RestaurantBooking.Api.csproj[m
+[1m+++ b/src/RestaurantBooking.Api/RestaurantBooking.Api.csproj[m
+[36m@@ -1,26 +1,23 @@[m
+ <Project Sdk="Microsoft.NET.Sdk.Web">[m
+[31m-[m
+   <PropertyGroup>[m
+[31m-    <TargetFramework>net10.0</TargetFramework>[m
+[32m+[m[32m    <TargetFramework>net8.0</TargetFramework>[m
+     <Nullable>enable</Nullable>[m
+     <ImplicitUsings>enable</ImplicitUsings>[m
+[32m+[m[32m    <EnableDefaultEmbeddedResourceItems>false</EnableDefaultEmbeddedResourceItems>[m
+   </PropertyGroup>[m
+[31m-[m
+   <ItemGroup>[m
+[31m-    <PackageReference Include="Hangfire.AspNetCore" Version="1.8.22" />[m
+[31m-    <PackageReference Include="Hangfire.PostgreSql" Version="1.20.13" />[m
+[31m-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />[m
+[31m-    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.2">[m
+[32m+[m[32m    <PackageReference Include="Hangfire.AspNetCore" Version="1.8.11" />[m
+[32m+[m[32m    <PackageReference Include="Hangfire.PostgreSql" Version="1.20.8" />[m
+[32m+[m[32m    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.0" />[m
+[32m+[m[32m    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.0">[m
+       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>[m
+       <PrivateAssets>all</PrivateAssets>[m
+     </PackageReference>[m
+[31m-    <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="10.0.2" />[m
+[31m-    <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.0" />[m
+[32m+[m[32m    <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="8.0.0" />[m
+[32m+[m[32m    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />[m
+   </ItemGroup>[m
+[31m-[m
+   <ItemGroup>[m
+     <ProjectReference Include="..\RestaurantBooking.Application\RestaurantBooking.Application.csproj" />[m
+     <ProjectReference Include="..\RestaurantBooking.Infrastructure\RestaurantBooking.Infrastructure.csproj" />[m
+   </ItemGroup>[m
+[31m-[m
+ </Project>[m
+[1mdiff --git "a/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Microsoft.Build.Locator.dll" "b/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Microsoft.Build.Locator.dll"[m
+[1mdeleted file mode 100755[m
+[1mindex 4fc1257..0000000[m
+Binary files "a/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Microsoft.Build.Locator.dll" and /dev/null differ
+[1mdiff --git "a/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Microsoft.CodeAnalysis.Workspaces.MSBuild.BuildHost.exe" "b/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Microsoft.CodeAnalysis.Workspaces.MSBuild.BuildHost.exe"[m
+[1mdeleted file mode 100755[m
+[1mindex 5dc984a..0000000[m
+Binary files "a/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Microsoft.CodeAnalysis.Workspaces.MSBuild.BuildHost.exe" and /dev/null differ
+[1mdiff --git "a/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Microsoft.CodeAnalysis.Workspaces.MSBuild.BuildHost.exe.config" "b/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Microsoft.CodeAnalysis.Workspaces.MSBuild.BuildHost.exe.config"[m
+[1mdeleted file mode 100755[m
+[1mindex f5d22a5..0000000[m
+[1m--- "a/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Microsoft.CodeAnalysis.Workspaces.MSBuild.BuildHost.exe.config"[m
+[1m+++ /dev/null[m
+[36m@@ -1,68 +0,0 @@[m
+[31m-<?xml version="1.0" encoding="utf-8"?>[m
+[31m-<configuration>[m
+[31m-  <startup>[m
+[31m-    <supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.7.2" />[m
+[31m-  </startup>[m
+[31m-  <runtime>[m
+[31m-    <assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">[m
+[31m-      <dependentAssembly>[m
+[31m-        <assemblyIdentity name="Microsoft.Build" publicKeyToken="b03f5f7f11d50a3a" culture="neutral" />[m
+[31m-        <bindingRedirect oldVersion="0.0.0.0-15.1.0.0" newVersion="15.1.0.0" />[m
+[31m-      </dependentAssembly>[m
+[31m-    </assemblyBinding>[m
+[31m-    <assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">[m
+[31m-      <dependentAssembly>[m
+[31m-        <assemblyIdentity name="Microsoft.Build.Framework" publicKeyToken="b03f5f7f11d50a3a" culture="neutral" />[m
+[31m-        <bindingRedirect oldVersion="0.0.0.0-15.1.0.0" newVersion="15.1.0.0" />[m
+[31m-      </dependentAssembly>[m
+[31m-    </assemblyBinding>[m
+[31m-    <assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">[m
+[31m-      <dependentAssembly>[m
+[31m-        <assemblyIdentity name="Microsoft.Build.Utilities.Core" publicKeyToken="b03f5f7f11d50a3a" culture="neutral" />[m
+[31m-        <bindingRedirect oldVersion="0.0.0.0-15.1.0.0" newVersion="15.1.0.0" />[m
+[31m-      </dependentAssembly>[m
+[31m-    </assemblyBinding>[m
+[31m-    <assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">[m
+[31m-      <dependentAssembly>[m
+[31m-        <assemblyIdentity name="Microsoft.Build.Tasks.Core" publicKeyToken="b03f5f7f11d50a3a" culture="neutral" />[m
+[31m-        <bindingRedirect oldVersion="0.0.0.0-15.1.0.0" newVersion="15.1.0.0" />[m
+[31m-      </dependentAssembly>[m
+[31m-    </assemblyBinding>[m
+[31m-    <assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">[m
+[31m-      <dependentAssembly>[m
+[31m-        <assemblyIdentity name="Microsoft.IO.Redist" publicKeyToken="cc7b13ffcd2ddd51" culture="neutral" />[m
+[31m-        <bindingRedirect oldVersion="0.0.0.0-6.1.0.0" newVersion="6.1.0.0" />[m
+[31m-      </dependentAssembly>[m
+[31m-    </assemblyBinding>[m
+[31m-    <assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">[m
+[31m-      <dependentAssembly>[m
+[31m-        <assemblyIdentity name="System.Buffers" publicKeyToken="cc7b13ffcd2ddd51" culture="neutral" />[m
+[31m-        <bindingRedirect oldVersion="0.0.0.0-4.0.4.0" newVersion="4.0.4.0" />[m
+[31m-      </dependentAssembly>[m
+[31m-    </assemblyBinding>[m
+[31m-    <assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">[m
+[31m-      <dependentAssembly>[m
+[31m-        <assemblyIdentity name="System.Collections.Immutable" publicKeyToken="b03f5f7f11d50a3a" culture="neutral" />[m
+[31m-        <bindingRedirect oldVersion="0.0.0.0-9.0.0.0" newVersion="9.0.0.0" />[m
+[31m-      </dependentAssembly>[m
+[31m-    </assemblyBinding>[m
+[31m-    <assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">[m
+[31m-      <dependentAssembly>[m
+[31m-        <assemblyIdentity name="System.Memory" publicKeyToken="cc7b13ffcd2ddd51" culture="neutral" />[m
+[31m-        <bindingRedirect oldVersion="0.0.0.0-4.0.2.0" newVersion="4.0.2.0" />[m
+[31m-      </dependentAssembly>[m
+[31m-    </assemblyBinding>[m
+[31m-    <assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">[m
+[31m-      <dependentAssembly>[m
+[31m-        <assemblyIdentity name="System.Runtime.CompilerServices.Unsafe" publicKeyToken="b03f5f7f11d50a3a" culture="neutral" />[m
+[31m-        <bindingRedirect oldVersion="0.0.0.0-6.0.1.0" newVersion="6.0.1.0" />[m
+[31m-      </dependentAssembly>[m
+[31m-    </assemblyBinding>[m
+[31m-    <assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">[m
+[31m-      <dependentAssembly>[m
+[31m-        <assemblyIdentity name="System.Threading.Tasks.Extensions" publicKeyToken="cc7b13ffcd2ddd51" culture="neutral" />[m
+[31m-        <bindingRedirect oldVersion="0.0.0.0-4.2.1.0" newVersion="4.2.1.0" />[m
+[31m-      </dependentAssembly>[m
+[31m-    </assemblyBinding>[m
+[31m-  </runtime>[m
+[31m-</configuration>[m
+\ No newline at end of file[m
+[1mdiff --git "a/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Microsoft.IO.Redist.dll" "b/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Microsoft.IO.Redist.dll"[m
+[1mdeleted file mode 100755[m
+[1mindex 5d213be..0000000[m
+Binary files "a/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Microsoft.IO.Redist.dll" and /dev/null differ
+[1mdiff --git "a/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Newtonsoft.Json.dll" "b/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Newtonsoft.Json.dll"[m
+[1mdeleted file mode 100755[m
+[1mindex 4c6c276..0000000[m
+Binary files "a/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/Newtonsoft.Json.dll" and /dev/null differ
+[1mdiff --git "a/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/System.Buffers.dll" "b/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/System.Buffers.dll"[m
+[1mdeleted file mode 100755[m
+[1mindex 9f5d1e3..0000000[m
+Binary files "a/src/RestaurantBooking.Api/bin\\Debug/net10.0/BuildHost-net472/System.Buffers.dll" and /dev/null differ
+[1mdiff --git "a/src/Restaurant
